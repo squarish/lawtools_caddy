@@ -6,7 +6,6 @@
 # door, and everything behind it on a private network.
 #
 # Adding a site is one new file in sites/. Nothing in here changes.
-
 {
 	# Where Let's Encrypt sends notice that a certificate is about to expire
 	# unrenewed. Caddy renews at two-thirds of the lifetime, so this should

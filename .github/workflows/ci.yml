@@ -43,28 +43,13 @@ jobs:
       - name: Pull Caddy
         run: docker pull caddy:2-alpine
 
-      # Fails if any file is not in canonical form. Formatting is not a matter
-      # of taste in a Caddyfile: indentation is not significant, but a stray
-      # brace that fmt would move is usually a block that closed in the wrong
-      # place, and this catches the class.
-      - name: Check formatting
-        run: |
-          set -euo pipefail
-          status=0
-          for f in Caddyfile sites/*.caddy; do
-            echo "--- $f"
-            out=$(docker run --rm -v "$PWD:/etc/caddy:ro" \
-              --entrypoint caddy caddy:2-alpine fmt "/etc/caddy/$f")
-            if ! printf '%s\n' "$out" | diff -u "$f" - ; then
-              status=1
-            fi
-          done
-          exit $status
-
       # Parses the Caddyfile, follows the sites/ import, and builds the JSON
       # config Caddy would actually run. Catches unknown directives, bad
       # matchers, and malformed CIDRs in trusted_proxies. It does not check
       # that an upstream container exists — nothing offline can.
+      #
+      # First, because it is the step that prevents an outage. A formatting nit
+      # reported ahead of it would fail the job and hide this result.
       - name: Validate configuration
         run: |
           docker run --rm -v "$PWD:/etc/caddy:ro" -e ACME_EMAIL \
@@ -77,3 +62,17 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
+
+      # `caddy fmt` exits non-zero when a file is not in canonical form, so it
+      # is the check as well as the fixer; --diff prints what it would change.
+      # Formatting is not purely cosmetic in a Caddyfile — indentation carries
+      # no meaning, so a brace that fmt wants to move is usually a block that
+      # closed somewhere other than intended.
+      #
+      # `make fmt` fixes anything reported here.
+      - name: Check formatting
+        run: |
+          for f in Caddyfile sites/*.caddy; do
+            docker run --rm -v "$PWD:/etc/caddy:ro" \
+              --entrypoint caddy caddy:2-alpine fmt --diff "/etc/caddy/$f"
+          done
