@@ -102,7 +102,8 @@ Any stack that wants to be served through this edge must:
 ## Companion changes needed in `squarish/nzsc-django`
 
 These are not in this repository, but nothing works without them. Listed
-worst-first: the third one is the trap.
+worst-first: the third one is the trap. All are on the
+`claude/nzsc-django-deployment-emwitd` branch of that repo.
 
 ### 1. `FORCE_SCRIPT_NAME` — `config/settings.py`
 
@@ -117,10 +118,24 @@ form action and redirect points out of the subdirectory.
 FORCE_SCRIPT_NAME = os.environ.get("DJANGO_FORCE_SCRIPT_NAME") or None
 ```
 
-`STATIC_URL` and `MEDIA_URL` are already relative (`"static/"`, `"media/"`), so
-Django prefixes them automatically and no template needs touching. The front
-end already builds its endpoints with `{% url %}` rather than literals. That is
-why the subdirectory is nearly free.
+`STATIC_URL` and `MEDIA_URL` derive from it in the same file:
+
+```python
+STATIC_URL = f"{FORCE_SCRIPT_NAME or ''}/static/"
+MEDIA_URL = f"{FORCE_SCRIPT_NAME or ''}/media/"
+```
+
+Django can prefix these on its own if they are written relative (`"static/"`),
+but it resolves the prefix when the value is first read and both readers cache
+it — `LazySettings` keeps the string, and staticfiles' storage singleton
+captures `base_url` at construction. The first read wins for the life of the
+process, so one read before any request has set a prefix freezes `/static/`
+into every page that process renders: a site with no stylesheet, and nothing in
+the log. Deriving it explicitly removes the timing question.
+
+The front end already builds its endpoints with `{% url %}` rather than
+literals, so nothing in the templates needs touching. That is why the
+subdirectory is otherwise cheap.
 
 ### 2. Cookie names — `config/settings.py`
 
@@ -171,6 +186,14 @@ proxy_set_header X-Forwarded-Proto $forwarded_proto;
 
 Trusting a client-supplied header is only safe because step 1 of the contract
 removed the published port: nothing but Caddy can reach nginx.
+
+### 3a. `LOGIN_REDIRECT_URL` — `config/settings.py`
+
+It was the literal `"/admin/"`, the one hardcoded absolute path in the tree.
+Under a prefix that sends a successful login to `/admin/` — outside the
+subdirectory, where this edge has nothing mounted, so signing in lands on the
+404 above. It is `"admin:index"` now, a URL name, so it goes through
+`reverse()`.
 
 ### 4. `compose.yml` and `.env`
 
@@ -251,6 +274,7 @@ problem.
 | `ERR_TOO_MANY_REDIRECTS` | Companion change 3, or Cloudflare set to Flexible instead of Full (strict). |
 | Every route under `/nzsc/` 404s, root included | `handle` used instead of `handle_path`, so the prefix arrived unstripped. |
 | Pages load but every link drops the `/nzsc` prefix | `FORCE_SCRIPT_NAME` not set. |
+| Signing into the admin lands on the edge's 404 | `LOGIN_REDIRECT_URL` written as a path instead of a URL name. |
 | CSS and thumbnails 404, HTML fine | The app's nginx is not receiving the stripped path, or `collectstatic` has not run into the shared volume. |
 | `502 Bad Gateway` | The target container is not running, or not on the `edge` network. `make ps`. |
 | Cloudflare `526` | Origin certificate not yet issued. `docker compose logs caddy`. |
