@@ -1,0 +1,59 @@
+# The host edge. `docker compose up -d`, with a .env beside it.
+#
+# This stack owns ports 80 and 443 and nothing else on the box may bind them.
+# Application stacks publish no ports; they join the `edge` network and Caddy
+# reaches them by container name over it.
+#
+# Both the network and the certificate volume are declared external, so they
+# outlive this stack and `docker compose down -v` cannot take them with it.
+# See README.md for the two one-time create commands.
+
+name: lawtools-edge
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: lawtools_caddy
+    restart: always
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    env_file: ./.env
+
+    volumes:
+      # Read-only: the config is version-controlled and edited in git, never in
+      # the container. `docker compose restart caddy` picks up a change.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./sites:/etc/caddy/sites:ro
+      # Certificates and ACME account keys. Losing this means re-issuing every
+      # certificate, and Let's Encrypt allows five per domain per week — enough
+      # to recover once, not enough to recover from a habit. Hence `external`.
+      - caddy_data:/data
+      # Caddy's autosaved config. Regenerated on every start, so an ordinary
+      # named volume: there is nothing here worth protecting.
+      - caddy_config:/config
+
+    networks:
+      - edge
+
+    # A busy edge writes a lot of access log. Without a cap, the JSON log file
+    # grows until the droplet's disk is full, which presents as every service
+    # failing at once for no apparent reason.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  edge:
+    external: true
+    name: edge
+
+volumes:
+  caddy_data:
+    external: true
+    name: caddy_data
+  caddy_config:

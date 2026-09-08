@@ -1,0 +1,66 @@
+# lawtools.nz — one domain, one subdirectory per application.
+#
+# Each application is a separate compose stack in its own repository, cloned to
+# /home/jack/<repo> and joined to the `edge` network. This file is the only
+# place that knows a URL prefix maps to a container.
+
+lawtools.nz {
+	encode zstd gzip
+
+	# --- /nzsc — squarish/nzsc-django, at /home/jack/nzsc-django -------------
+
+	# handle_path below matches /nzsc/* and so never sees a bare /nzsc. Without
+	# this the prefix with no trailing slash falls through to the catch-all and
+	# 404s, which looks exactly like a broken deployment.
+	redir /nzsc /nzsc/ permanent
+
+	# handle_path strips the matched prefix: a request for /nzsc/admin/ reaches
+	# the stack as /admin/. That stripping is load-bearing, and it is the one
+	# thing in this file that is easy to get wrong.
+	#
+	# Django resolves URLs against the unprefixed path, so the app must receive
+	# /admin/ — but it must *generate* /nzsc/admin/, or every link on the page
+	# points outside the subdirectory. FORCE_SCRIPT_NAME=/nzsc in the app's
+	# settings is what puts the prefix back on generated URLs. Strip here,
+	# restore there; the two are a pair and neither works alone.
+	#
+	# Use `handle` in place of `handle_path` and the prefix arrives unstripped,
+	# matches nothing in the URLconf, and every single route 404s.
+	#
+	# The upstream is nzsc-django's own nginx, not gunicorn. It stays in the
+	# stack because it serves ~434 MB of cover thumbnails and the collected
+	# static files straight off a volume, and because it keeps that stack
+	# deployable on its own. Its /static/, /media/ and /mcp locations all match
+	# correctly against the stripped path, so its config needs no change.
+	handle_path /nzsc/* {
+		reverse_proxy nzsc_nginx:80
+	}
+
+	# --- future siblings ----------------------------------------------------
+	#
+	# Copy the two directives above, change the prefix and the container name:
+	#
+	#   redir /other /other/ permanent
+	#   handle_path /other/* {
+	#       reverse_proxy other_nginx:80
+	#   }
+
+	# Nothing lives at the root yet. A 404 rather than a redirect to /nzsc/,
+	# because a redirect is a promise that has to be broken the day a second
+	# application lands here or the root gets a real landing page.
+	handle {
+		respond "Not found" 404
+	}
+
+	handle_errors {
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}
+
+# Uncomment once a www record exists in Cloudflare DNS. Leaving it on without
+# the record means Caddy retries a certificate it can never obtain, forever, in
+# the logs.
+#
+# www.lawtools.nz {
+# 	redir https://lawtools.nz{uri} permanent
+# }

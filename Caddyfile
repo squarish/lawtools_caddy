@@ -1,0 +1,48 @@
+# The edge for every site on this box.
+#
+# Caddy is the only process bound to :80 and :443. Every application stack
+# publishes no ports at all; each one joins the external `edge` Docker network
+# and is reached here by container name. That is the whole architecture: one
+# door, and everything behind it on a private network.
+#
+# Adding a site is one new file in sites/. Nothing in here changes.
+
+{
+	# Where Let's Encrypt sends notice that a certificate is about to expire
+	# unrenewed. Caddy renews at two-thirds of the lifetime, so this should
+	# never arrive; if it does, renewal has been failing silently for weeks and
+	# this mail is the only thing that will tell you.
+	email {$ACME_EMAIL}
+
+	# The admin API is an unauthenticated endpoint that can replace the entire
+	# running configuration. Its default address is localhost:2019, which is
+	# not published to the host — but *is* reachable from every other container
+	# on the `edge` network, which turns any application compromise into
+	# control of the edge. Moving it to a unix socket inside this container
+	# closes that path while keeping `caddy reload` working, which `admin off`
+	# would not: reload is an admin API call.
+	admin unix//run/caddy-admin.sock
+
+	servers {
+		# Every request arrives via Cloudflare, so the socket's peer address is
+		# a Cloudflare edge node rather than the visitor. Listing those ranges
+		# as trusted is what lets Caddy take the real client address from
+		# X-Forwarded-For — and, more to the point, what stops it believing
+		# that header from anyone who is not Cloudflare.
+		#
+		# Fetched 2026-09-08. Refresh with:
+		#   curl -s https://www.cloudflare.com/ips-v4 https://www.cloudflare.com/ips-v6
+		# Cloudflare changes these very rarely; check once a year.
+		#
+		# One line on purpose. The Caddyfile does accept a trailing backslash
+		# as a line continuation, but a wrapped list that is subtly wrong takes
+		# the whole edge down, and this is not worth being clever about.
+		trusted_proxies static 173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32
+	}
+}
+
+# Import paths resolve relative to this file, so this is /etc/caddy/sites/ in
+# the container. A site with no matching file here simply is not served; a
+# Caddyfile with a syntax error in it stops Caddy from starting at all, which
+# is what the CI check exists to prevent.
+import sites/*.caddy

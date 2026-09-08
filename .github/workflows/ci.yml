@@ -1,0 +1,79 @@
+# A syntax error in the Caddyfile does not degrade the edge, it stops Caddy
+# from starting — which takes down every site on the box at once. This job runs
+# the same parser Caddy runs at boot, on every change, before it can reach the
+# server.
+#
+# Nothing here deploys. It only answers "would this config start?".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  caddy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # The config reads {$ACME_EMAIL} from the environment. Any syntactically
+      # valid address will do — validation does not contact Let's Encrypt.
+      ACME_EMAIL: validate@example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same image and tag the droplet runs, so a directive that parses
+      # here parses there. Pinning to :2-alpine rather than a digest means a
+      # Caddy point release can in principle break this job before it breaks
+      # production — which is the order you want to find out in.
+      # --entrypoint is passed explicitly to every `docker run` below. The
+      # image sets ENTRYPOINT ["caddy"], so `docker run caddy:2-alpine caddy
+      # validate` would run `caddy caddy validate` and fail on an unknown
+      # subcommand. Naming the entrypoint works whichever way the image is
+      # built, and does not silently break if that ever changes.
+      - name: Pull Caddy
+        run: docker pull caddy:2-alpine
+
+      # Fails if any file is not in canonical form. Formatting is not a matter
+      # of taste in a Caddyfile: indentation is not significant, but a stray
+      # brace that fmt would move is usually a block that closed in the wrong
+      # place, and this catches the class.
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          status=0
+          for f in Caddyfile sites/*.caddy; do
+            echo "--- $f"
+            out=$(docker run --rm -v "$PWD:/etc/caddy:ro" \
+              --entrypoint caddy caddy:2-alpine fmt "/etc/caddy/$f")
+            if ! printf '%s\n' "$out" | diff -u "$f" - ; then
+              status=1
+            fi
+          done
+          exit $status
+
+      # Parses the Caddyfile, follows the sites/ import, and builds the JSON
+      # config Caddy would actually run. Catches unknown directives, bad
+      # matchers, and malformed CIDRs in trusted_proxies. It does not check
+      # that an upstream container exists — nothing offline can.
+      - name: Validate configuration
+        run: |
+          docker run --rm -v "$PWD:/etc/caddy:ro" -e ACME_EMAIL \
+            --entrypoint caddy caddy:2-alpine validate \
+            --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      # compose.yml is the other file that can stop the edge from coming back
+      # up. `config` renders it with .env applied and fails on a bad key.
+      - name: Validate compose file
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
