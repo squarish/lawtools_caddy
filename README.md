@@ -27,25 +27,66 @@ Cloudflare ──443──▶ Caddy ──▶ nzsc_nginx:80 ──▶ nzsc_web:8
 On the server this is cloned to `/home/jack/lawtools_caddy`, alongside
 `/home/jack/nzsc-django` and any later siblings.
 
-## First-time setup
+## Deploying a droplet from scratch
 
-A plain Ubuntu droplet does not ship with Docker; only DigitalOcean's Docker
-marketplace image does. Check before anything else, because every target in the
-`Makefile` shells out to it:
+Start to finish on a new box. Two orderings matter, and both are called out
+where they bite: the DNS record has to exist before the edge starts, and the
+edge has to exist before an application stack can join it.
+
+### 1. Prepare the box
+
+A plain Ubuntu droplet ships with neither swap nor Docker. Only DigitalOcean's
+Docker marketplace image has the second.
+
+**Swap.** A 1 GB droplet has none, and a `docker compose build` that reaches the
+ceiling is killed by the OOM reaper rather than slowed down — which reads as a
+mysteriously failing build, not as a memory problem. Two gigabytes costs nothing
+while unused:
+
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swappiness.conf
+sudo sysctl vm.swappiness=10
+free -h
+```
+
+The `chmod 600` is not optional — `mkswap` refuses a world-readable file, and it
+is right to: anything paged out is readable there. `swappiness=10` keeps swap as
+headroom for builds rather than somewhere the kernel relocates a running
+gunicorn to. The `fstab` line is what survives a reboot, which is exactly when
+nobody is watching.
+
+**Docker.**
 
 ```bash
 docker compose version
 ```
 
-If that reports a version, skip ahead. If it says `docker: command not found`:
+If that prints a version, skip ahead. If it says `docker: command not found`:
 
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER
 ```
 
-Then open a new login shell — group membership is read at login, so the current
-shell will keep getting `permission denied` on the socket until you do.
+Then **open a new login shell.** Group membership is read at login, so until you
+do, this one keeps getting `permission denied` on `/var/run/docker.sock`.
+
+### 2. Point DNS at the droplet, unproxied
+
+One A record: `lawtools.nz` → the droplet's IPv4, set to **DNS only** (grey
+cloud).
+
+This comes before the edge starts. Caddy proves it controls the domain over
+plain HTTP on port 80, so the name has to resolve to the droplet and reach it
+directly. Leaving Cloudflare's proxy off until step 5 also means that when
+something breaks in between, there is one fewer thing it could be.
+
+### 3. The edge
 
 ```bash
 git clone https://github.com/squarish/lawtools_caddy.git /home/jack/lawtools_caddy
@@ -71,20 +112,68 @@ them:
 
 **Never run `docker compose down -v` in this directory.** `make down` is safe.
 
+Wait for the certificate before going further:
+
+```bash
+docker compose logs caddy | grep -i "certificate obtained"
+```
+
+At this point `https://lawtools.nz/` answers 404 and `https://lawtools.nz/nzsc/`
+answers 502. Both are correct: the routing exists, the application behind it
+does not yet.
+
+### 4. The application stack
+
+```bash
+git clone https://github.com/squarish/nzsc-django.git /home/jack/nzsc-django
+cd /home/jack/nzsc-django
+cp .env.example .env
+nano .env
+docker compose up -d --build
+docker compose logs -f web
+```
+
+Its `.env` needs the subdirectory settings — `DJANGO_FORCE_SCRIPT_NAME`, the two
+cookie names, and the rest — listed in full under [companion change
+4](#4-composeyml-and-env) below. That repository's `.env.example` documents
+every variable it reads.
+
+The `web` container's entrypoint waits for Postgres, migrates, and runs
+`collectstatic` on boot, so there is no separate step for any of the three.
+Watch that in `logs -f`: a first boot ends with a schema and no rows.
+
+Creating the first account is a manual step, and loading the corpus is that
+repository's business rather than the edge's — see its README.
+
+```bash
+docker compose exec web python manage.py createsuperuser
+```
+
+### 5. Verify the origin, before Cloudflare is a variable
+
+```bash
+curl -sI https://lawtools.nz/nzsc/ | head -1     # 200
+curl -sI https://lawtools.nz/nzsc  | head -1     # 301, Location: /nzsc/
+curl -sI https://lawtools.nz/      | head -1     # 404, deliberately
+```
+
+If those three are right, the edge is doing its job, and anything that breaks
+after the next step is Cloudflare's doing. If `/nzsc/` gives 502, the app stack
+is not on the `edge` network or is not running: `make ps` lists both.
+
+### 6. Cloudflare, then the firewall
+
+Both below. Do them in that order — the firewall rules are written in terms of
+Cloudflare's address ranges, and applying them while the record is still grey
+locks you out of your own origin.
+
 ## Cloudflare
 
-Do this in order. It avoids every error window.
+Steps 2 to 5 above leave a working origin on a grey-cloud record. Two changes
+remain, in this order:
 
-1. **A record** `lawtools.nz` → the droplet's IPv4, initially **DNS only**
-   (grey cloud). Caddy needs to be reachable directly to prove it controls the
-   domain, and you want to confirm Caddy works before Cloudflare is a variable.
-2. `make up`, then wait for the certificate:
-   ```bash
-   docker compose logs caddy | grep -i "certificate obtained"
-   curl -I https://lawtools.nz/nzsc/
-   ```
-3. Flip the record to **Proxied** (orange cloud).
-4. **SSL/TLS → Overview → Full (strict)**.
+1. Flip the record to **Proxied** (orange cloud).
+2. **SSL/TLS → Overview → Full (strict)**.
 
 That last setting is not optional. Under **Flexible**, Cloudflare speaks plain
 HTTP to the origin; Django sees an insecure request, `SECURE_SSL_REDIRECT`
@@ -298,5 +387,5 @@ problem.
 | `502 Bad Gateway` | The target container is not running, or not on the `edge` network. `make ps`. |
 | Cloudflare `526` | Origin certificate not yet issued. `docker compose logs caddy`. |
 | Caddy will not start after an edit | `make validate` says why. CI would have caught it. |
-| `make: docker: No such file or directory` | Docker is not installed, or not on this shell's PATH. See First-time setup. |
-| `permission denied` on `/var/run/docker.sock` | You are not in the `docker` group, or you are but have not opened a new login shell since. |
+| `make: docker: No such file or directory` | Docker is not installed, or not on this shell's PATH. Deployment step 1. |
+| `permission denied` on `/var/run/docker.sock` | You are not in the `docker` group, or you are but have not opened a new login shell since. Deployment step 1. |
