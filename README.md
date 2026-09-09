@@ -32,7 +32,8 @@ On the server this is cloned to `/home/jack/lawtools_caddy`, alongside
 ```bash
 git clone https://github.com/squarish/lawtools_caddy.git /home/jack/lawtools_caddy
 cd /home/jack/lawtools_caddy
-cp .env.example .env && $EDITOR .env      # set ACME_EMAIL
+cp .env.example .env
+nano .env                                 # set ACME_EMAIL to an address you read
 
 make bootstrap                            # creates the `edge` network and caddy_data volume
 make up                                   # validates the config, then starts
