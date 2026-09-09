@@ -29,6 +29,24 @@ On the server this is cloned to `/home/jack/lawtools_caddy`, alongside
 
 ## First-time setup
 
+A plain Ubuntu droplet does not ship with Docker; only DigitalOcean's Docker
+marketplace image does. Check before anything else, because every target in the
+`Makefile` shells out to it:
+
+```bash
+docker compose version
+```
+
+If that reports a version, skip ahead. If it says `docker: command not found`:
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER
+```
+
+Then open a new login shell — group membership is read at login, so the current
+shell will keep getting `permission denied` on the socket until you do.
+
 ```bash
 git clone https://github.com/squarish/lawtools_caddy.git /home/jack/lawtools_caddy
 cd /home/jack/lawtools_caddy
@@ -280,3 +298,5 @@ problem.
 | `502 Bad Gateway` | The target container is not running, or not on the `edge` network. `make ps`. |
 | Cloudflare `526` | Origin certificate not yet issued. `docker compose logs caddy`. |
 | Caddy will not start after an edit | `make validate` says why. CI would have caught it. |
+| `make: docker: No such file or directory` | Docker is not installed, or not on this shell's PATH. See First-time setup. |
+| `permission denied` on `/var/run/docker.sock` | You are not in the `docker` group, or you are but have not opened a new login shell since. |
