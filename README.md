@@ -133,10 +133,13 @@ docker compose up -d --build
 docker compose logs -f web
 ```
 
-Its `.env` needs the subdirectory settings — `DJANGO_FORCE_SCRIPT_NAME`, the two
-cookie names, and the rest — listed in full under [companion change
-4](#4-composeyml-and-env) below. That repository's `.env.example` documents
-every variable it reads.
+The whole `.env` for this deployment is written out under [companion change
+4](#4-composeyml-and-env) below — copy it from there rather than assembling one,
+because four of its lines exist to override a default that is wrong here and
+silent about it. `DJANGO_DEBUG=0` and `MCP_API_KEY` are the two that will not
+wait: the first serves debug tracebacks to the public, the second can take nginx
+down with it. That repository's `.env.example` documents every variable it
+reads.
 
 The `web` container's entrypoint waits for Postgres, migrates, and runs
 `collectstatic` on boot, so there is no separate step for any of the three.
@@ -210,8 +213,9 @@ Any stack that wants to be served through this edge must:
 ## Companion changes needed in `squarish/nzsc-django`
 
 These are not in this repository, but nothing works without them. Listed
-worst-first: the third one is the trap. All are on the
-`claude/nzsc-django-deployment-emwitd` branch of that repo.
+worst-first: the third one is the trap. All four are on `main` in that repo —
+a fresh clone has them, and there is no branch to check out. They are written
+out here anyway, because what they are for is not obvious from reading them.
 
 ### 1. `FORCE_SCRIPT_NAME` — `config/settings.py`
 
@@ -305,24 +309,77 @@ subdirectory, where this edge has nothing mounted, so signing in lands on the
 
 ### 4. `compose.yml` and `.env`
 
-Drop `ports:` from the `nginx` service, add it to the external `edge` network,
-and set:
+Drop `ports:` from the `nginx` service and add it to the external `edge`
+network. Both are already done on `main`.
+
+The `.env` is the part that is still on you. Below is the whole file for this
+deployment, not only the subdirectory half: four of these are things whose
+*default* is wrong here, and a default is exactly what nobody notices.
 
 ```
+# Nothing below this line has a safe default. See the notes after the block.
+DJANGO_SECRET_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(64))">
+DJANGO_DEBUG=0
+DJANGO_ALLOWED_HOSTS=lawtools.nz,web
+DJANGO_CSRF_TRUSTED_ORIGINS=https://lawtools.nz
+
+DATABASE_NAME=nzsc
+DATABASE_USERNAME=nzsc
+DATABASE_PASSWORD=<something long>
+DATABASE_PORT=5432
+
 DJANGO_FORCE_SCRIPT_NAME=/nzsc
 DJANGO_SESSION_COOKIE_NAME=nzsc_sessionid
 DJANGO_CSRF_COOKIE_NAME=nzsc_csrftoken
-DJANGO_ALLOWED_HOSTS=lawtools.nz
-DJANGO_CSRF_TRUSTED_ORIGINS=https://lawtools.nz
+
 DJANGO_SECURE_COOKIES=1
 DJANGO_SECURE_SSL_REDIRECT=1
 DJANGO_SECURE_HSTS_SECONDS=31536000
+
 NGINX_SERVER_NAME=lawtools.nz
+
+MCP_API_KEY=<openssl rand -hex 32>
+MCP_ALLOWED_HOSTS=localhost,127.0.0.1,mcp,lawtools.nz
 ```
+
+**`DJANGO_DEBUG=0` is not optional and does not happen on its own.** It
+defaults to *on* — `_env_bool("DJANGO_DEBUG", True)` in `config/settings.py` —
+and `.env.example` ships it commented out, so a file assembled from the
+subdirectory settings alone serves Django's debug tracebacks, settings and
+SQL to anyone who can reach a 500. Everything else on this page is a
+deployment that does not work; this is one that works and should not.
+
+**`MCP_API_KEY` must be set even if you never use the MCP server.**
+`mcp_server/server.py` raises on import without it, and the `mcp` service has
+`restart: always`, so it crash-loops instead of stopping. That is worse than it
+sounds: the app's `nginx.conf.template` declares `upstream mcp { server
+mcp:3000; }` with no `resolver`, and nginx resolves upstream names once, at
+config-load time. Docker's DNS only answers for running containers, so an nginx
+that starts during one of the crash windows dies with `host not found in
+upstream "mcp"` — and the symptom is the whole site down, with the cause in a
+container nobody was thinking about.
+
+**`DJANGO_ALLOWED_HOSTS` needs `web` as well as the public name.** The MCP
+server reaches Django at `http://web:8000`, so Django sees `Host: web` and
+answers 400 to a name it was never told about. `lawtools.nz` alone is right for
+every browser request and wrong for the one caller that is not a browser.
+
+**`MCP_ALLOWED_HOSTS` needs the public name** for the same reason in reverse.
+Caddy forwards the browser's `Host` unchanged and the app's nginx passes it
+through, so the MCP transport sees `lawtools.nz` and refuses it as a
+DNS-rebinding attempt — a 421, which reads like an auth failure and is not one.
 
 `NGINX_SERVER_NAME` is `lawtools.nz` because Caddy forwards the original `Host`
 header unchanged; the app's nginx still matches on the public name and still
 answers 444 to anything else.
+
+One caution about the HSTS line. `SECURE_HSTS_INCLUDE_SUBDOMAINS` and
+`SECURE_HSTS_PRELOAD` are both derived from `SECURE_HSTS_SECONDS > 0` in that
+repo's settings, so the value above commits *every* `lawtools.nz` subdomain to
+HTTPS and advertises an intent to be preloaded — a year-long promise made by an
+application living in a subdirectory. That is a reasonable thing to want, and a
+surprising thing to acquire by accident. `DJANGO_SECURE_HSTS_SECONDS=300` for
+the first week makes it reversible while you find out.
 
 ## Day to day
 
@@ -385,6 +442,10 @@ problem.
 | Signing into the admin lands on the edge's 404 | `LOGIN_REDIRECT_URL` written as a path instead of a URL name. |
 | CSS and thumbnails 404, HTML fine | The app's nginx is not receiving the stripped path, or `collectstatic` has not run into the shared volume. |
 | `502 Bad Gateway` | The target container is not running, or not on the `edge` network. `make ps`. |
+| Django's debug page on any error, in production | `DJANGO_DEBUG` unset. It defaults to on. Companion change 4. |
+| The whole site 502s, and `nzsc_nginx` exited with `host not found in upstream "mcp"` | `MCP_API_KEY` unset, so `nzsc_mcp` is crash-looping and nginx could not resolve it at startup. Companion change 4. |
+| `400 Bad Request` from the MCP server's API calls only | `DJANGO_ALLOWED_HOSTS` is missing `web`. Companion change 4. |
+| `421` from `/nzsc/mcp`, with a key that is right | `MCP_ALLOWED_HOSTS` is missing `lawtools.nz`. Companion change 4. |
 | Cloudflare `526` | Origin certificate not yet issued. `docker compose logs caddy`. |
 | Caddy will not start after an edit | `make validate` says why. CI would have caught it. |
 | `make: docker: No such file or directory` | Docker is not installed, or not on this shell's PATH. Deployment step 1. |
